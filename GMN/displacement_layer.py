@@ -31,5 +31,5 @@ class Displacement(nn.Module):
             for b, n in enumerate(ns_gt):
                 grad_mask[b, 0:n] = 1
 
-        d = torch.matmul(s, P_tgt) - P_src
+        d = torch.matmul(s.double(), P_tgt.double()) - P_src.double()
         return d, grad_mask

@@ -22,7 +22,8 @@ if __name__ == "__main__":
     lib_path = osp.join(this_dir, '../sparse_torch')
     add_path(lib_path)
 
-    max_num = 5000
+
+max_num = 300
 
 import json
 import os
@@ -31,19 +32,19 @@ import h5py
 import numpy as np
 import torch
 from PIL import Image
-from fgm import kronecker_sparse
+from utils.fgm import kronecker_sparse
 from sparse_torch import CSRMatrix3d
 from torch.utils.data import Dataset
 from torch.utils.data import DataLoader
 from torchvision.transforms import Resize, Compose, ToTensor
-from RRWM import *
+from lib.RRWM import *
 import argparse
 import json, string
 import numpy as np
 import numpy.matlib as npm
 import torch.nn.functional as F
 import random
-from config import cfg
+from utils.config import cfg
 from torchvision import transforms
 
 import numpy as np
@@ -138,8 +139,7 @@ class SGDataset(Dataset):
         imdb_h5 = h5py.File(data_root, 'r')
         image_list = imdb_h5['images']
 
-        if __name__ == "__main__":
-            image_list = image_list[:max_num]
+        image_list = image_list[:max_num]
 
         self.num_data = len(image_list)
         print(f"\ttotal {self.num_data} images")
@@ -170,7 +170,6 @@ class SGDataset(Dataset):
             if i % 10000 == 0:
                 print(f"\tprocessing admat idx {i}")
 
-            print(f"processing admat {i}")
             first_box_idx = label_h5['img_to_first_box'][i]
             last_box_idx = label_h5['img_to_last_box'][i]
             num_box = last_box_idx + 1 - first_box_idx
@@ -179,7 +178,6 @@ class SGDataset(Dataset):
 
             first_rel_idx = label_h5['img_to_first_rel'][i]
             last_rel_idx = label_h5['img_to_last_rel'][i]
-            print(first_rel_idx, last_rel_idx)
             if first_rel_idx == -1 or last_rel_idx == -1:
                 admat_list.append(admat)
                 continue
@@ -187,7 +185,6 @@ class SGDataset(Dataset):
             for j in range(first_rel_idx, last_rel_idx + 1):
                 src = label_h5['relationships'][j][0] - first_box_idx
                 dst = label_h5['relationships'][j][1] - first_box_idx
-                print(src, dst)
 
                 admat[src][dst] = 1
                 admat[dst][src] = 1
@@ -328,7 +325,8 @@ def collate_fn(data: list):
         elif type(inp[0]) == str:
             ret = inp
         else:
-            raise ValueError('Cannot handle type {}'.format(type(inp[0])))
+            ret = []
+            #raise ValueError('Cannot handle type {}'.format(type(inp[0])))
         return ret
 
     ret = stack(data)
