@@ -1,6 +1,8 @@
+import numpy as np
 import torch
 import torch.optim as optim
 import time
+from tqdm import tqdm
 from datetime import datetime
 from pathlib import Path
 from tensorboardX import SummaryWriter
@@ -18,16 +20,18 @@ from utils.hungarian import hungarian
 
 from utils.config import cfg
 
-
-def train_eval_model(model,
+def train_model(model,
                      criterion,
                      optimizer,
                      dataloader,
-                     tfboard_writer,
-                     num_epochs=25,
+                     num_epochs=1200,
                      resume=False,
                      start_epoch=0):
     print('Start training...')
+
+    flag_30 = False
+    flag_50 = False
+    flag_70 = False
 
     since = time.time()
     dataset_size = len(dataloader)
@@ -56,111 +60,183 @@ def train_eval_model(model,
                                                gamma=cfg.TRAIN.LR_DECAY,
                                                last_epoch=cfg.TRAIN.START_EPOCH - 1)
 
-    for epoch in range(start_epoch, num_epochs):
-        print('Epoch {}/{}'.format(epoch, num_epochs - 1))
-        print('-' * 10)
-
-        model.train()  # Set model to training mode
-
-        print('lr = ' + ', '.join(['{:.2e}'.format(x['lr']) for x in optimizer.param_groups]))
+    for epoch in tqdm(range(start_epoch, num_epochs)):
 
         epoch_loss = 0.0
         running_loss = 0.0
         running_since = time.time()
         iter_num = 0
 
-        # Iterate over data.
+
+        # Training
+        model.train()  # Set model to training mode
+        acc = 0
+        np.random.seed(None)
         for idx, inputs in enumerate(dataloader):
-            #print(idx, inputs)
-            if inputs == []:
-                continue
-            if idx % 100 == 0:
-                print(f"\ton image {idx}")
-            
-            inp_type = 'img'
-            data1, data2 = [_.cuda() for _ in inputs['images']]
-            P1_gt, P2_gt = [_.cuda() for _ in inputs['Ps']]
-            n1_gt, n2_gt = [_.cuda() for _ in inputs['ns']]
-            e1_gt, e2_gt = [_.cuda() for _ in inputs['es']]
-            G1_gt, G2_gt = [_.cuda() for _ in inputs['Gs']]
-            H1_gt, H2_gt = [_.cuda() for _ in inputs['Hs']]
-            KG, KH = [_.cuda() for _ in inputs['Ks']]
-            perm_mat = inputs['gt_perm_mat'].cuda()
-            
+            if idx > 10000:
+                #print(idx, inputs)
+                if inputs == []:
+                    continue
+                #if idx % 100 == 0:
+                #    print(f"\ton image {idx}")
+                
+                inp_type = 'img'
+                data1, data2 = [_.cuda() for _ in inputs['images']]
+                P1_gt, P2_gt = [_.cuda() for _ in inputs['Ps']]
+                n1_gt, n2_gt = [_.cuda() for _ in inputs['ns']]
+                e1_gt, e2_gt = [_.cuda() for _ in inputs['es']]
+                G1_gt, G2_gt = [_.cuda() for _ in inputs['Gs']]
+                H1_gt, H2_gt = [_.cuda() for _ in inputs['Hs']]
+                KG, KH = [_.cuda() for _ in inputs['Ks']]
+                perm_mat = inputs['gt_perm_mat'].cuda()
+                
+                iter_num = iter_num + 1
 
-            iter_num = iter_num + 1
+                # zero the parameter gradients
+                optimizer.zero_grad()
 
-            # zero the parameter gradients
-            optimizer.zero_grad()
+                with torch.set_grad_enabled(True):
+                    # forward
+                    s_pred, d_pred = \
+                        model(data1, data2, P1_gt, P2_gt, G1_gt, G2_gt, H1_gt, H2_gt, n1_gt, n2_gt, KG, KH, inp_type)
 
-            with torch.set_grad_enabled(True):
-                # forward
-                s_pred, d_pred = \
-                    model(data1, data2, P1_gt, P2_gt, G1_gt, G2_gt, H1_gt, H2_gt, n1_gt, n2_gt, KG, KH, inp_type)
+                    multi_loss = []
+                    if cfg.TRAIN.LOSS_FUNC == 'offset':
+                        d_gt, grad_mask = displacement(perm_mat, P1_gt, P2_gt, n1_gt)
+                        loss = criterion(d_pred.double(), d_gt.double(), grad_mask.double())
+                    elif cfg.TRAIN.LOSS_FUNC == 'perm':
+                        loss = criterion(s_pred.float(), perm_mat.float(), n1_gt, n2_gt)
+                    else:
+                        raise ValueError('Unknown loss function {}'.format(cfg.TRAIN.LOSS_FUNC))
 
-                multi_loss = []
-                if cfg.TRAIN.LOSS_FUNC == 'offset':
-                    d_gt, grad_mask = displacement(perm_mat, P1_gt, P2_gt, n1_gt)
-                    loss = criterion(d_pred.double(), d_gt.double(), grad_mask.double())
-                elif cfg.TRAIN.LOSS_FUNC == 'perm':
-                    loss = criterion(s_pred.double(), perm_mat, n1_gt, n2_gt)
-                else:
-                    raise ValueError('Unknown loss function {}'.format(cfg.TRAIN.LOSS_FUNC))
+                    # backward + optimize
+                    loss.backward()
+                    optimizer.step()
 
-                # backward + optimize
-                loss.backward()
-                optimizer.step()
+                    #if cfg.MODULE == 'NGM.hypermodel':
+                    #    tfboard_writer.add_scalars(
+                    #        'weight',
+                    #        {'w2': model.module.weight2, 'w3': model.module.weight3},
+                    #        epoch * cfg.TRAIN.EPOCH_ITERS + iter_num
+                    #    )
 
-                #if cfg.MODULE == 'NGM.hypermodel':
-                #    tfboard_writer.add_scalars(
-                #        'weight',
-                #        {'w2': model.module.weight2, 'w3': model.module.weight3},
-                #        epoch * cfg.TRAIN.EPOCH_ITERS + iter_num
-                #    )
+                    # training accuracy statistic
+                    acc, _, __ = matching_accuracy(lap_solver(s_pred.double(), n1_gt, n2_gt), perm_mat, n1_gt)
 
-                # training accuracy statistic
-                acc, _, __ = matching_accuracy(lap_solver(s_pred.double(), n1_gt, n2_gt), perm_mat, n1_gt)
+                    # tfboard writer
+                    loss_dict = {'loss_{}'.format(i): l.item() for i, l in enumerate(multi_loss)}
+                    loss_dict['loss'] = loss.item()
+                    #tfboard_writer.add_scalars('loss', loss_dict, epoch * cfg.TRAIN.EPOCH_ITERS + iter_num)
+                    #accdict = dict()
+                    #accdict['matching accuracy'] = acc
+                    #tfboard_writer.add_scalars(
+                    #    'training accuracy',
+                    #    accdict,
+                    #    epoch * cfg.TRAIN.EPOCH_ITERS + iter_num
+                    #)
 
-                # tfboard writer
-                loss_dict = {'loss_{}'.format(i): l.item() for i, l in enumerate(multi_loss)}
-                loss_dict['loss'] = loss.item()
-                #tfboard_writer.add_scalars('loss', loss_dict, epoch * cfg.TRAIN.EPOCH_ITERS + iter_num)
-                #accdict = dict()
-                #accdict['matching accuracy'] = acc
-                #tfboard_writer.add_scalars(
-                #    'training accuracy',
-                #    accdict,
-                #    epoch * cfg.TRAIN.EPOCH_ITERS + iter_num
-                #)
+                    # statistics
+                    running_loss += loss.item() * perm_mat.size(0)
+                    epoch_loss += loss.item() * perm_mat.size(0)
 
-                # statistics
-                running_loss += loss.item() * perm_mat.size(0)
-                epoch_loss += loss.item() * perm_mat.size(0)
-
-                #if iter_num % cfg.STATISTIC_STEP == 0:
-                #    running_speed = cfg.STATISTIC_STEP * perm_mat.size(0) / (time.time() - running_since)
-                #    print('Epoch {:<4} Iteration {:<4} {:>4.2f}sample/s Loss={:<8.4f}'
-                #          .format(epoch, iter_num, running_speed, running_loss / cfg.STATISTIC_STEP / perm_mat.size(0)))
-                #    tfboard_writer.add_scalars(
-                #        'speed',
-                #        {'speed': running_speed},
-                #        epoch * cfg.TRAIN.EPOCH_ITERS + iter_num
-                #    )
-                #    running_loss = 0.0
-                #    running_since = time.time()
+                    #if iter_num % cfg.STATISTIC_STEP == 0:
+                    #    running_speed = cfg.STATISTIC_STEP * perm_mat.size(0) / (time.time() - running_since)
+                    #    print('Epoch {:<4} Iteration {:<4} {:>4.2f}sample/s Loss={:<8.4f}'
+                    #          .format(epoch, iter_num, running_speed, running_loss / cfg.STATISTIC_STEP / perm_mat.size(0)))
+                    #    tfboard_writer.add_scalars(
+                    #        'speed',
+                    #        {'speed': running_speed},
+                    #        epoch * cfg.TRAIN.EPOCH_ITERS + iter_num
+                    #    )
+                    #    running_loss = 0.0
+                    #    running_since = time.time()
 
         epoch_loss = epoch_loss / dataset_size
 
-        save_model(model, str(checkpoint_path / 'params_{:04}.pt'.format(epoch + 1)))
-        #torch.save(optimizer.state_dict(), str(checkpoint_path / 'optim_{:04}.pt'.format(epoch + 1)))
 
-        print('Epoch {:<4} Loss: {:.4f} Acc: {:.4f}'.format(epoch, epoch_loss, acc))
-        print()
+        # evaluation
+        model.eval()  
+        acc = 0
+        np.random.seed(123)
+        for idx, inputs in enumerate(dataloader):
+            if idx < 10000:
+                #print(idx, inputs)
+                if inputs == []:
+                    continue
+                #if idx % 100 == 0:
+                #    print(f"\ton image {idx}")
+                
+                inp_type = 'img'
+                data1, data2 = [_.cuda() for _ in inputs['images']]
+                P1_gt, P2_gt = [_.cuda() for _ in inputs['Ps']]
+                n1_gt, n2_gt = [_.cuda() for _ in inputs['ns']]
+                e1_gt, e2_gt = [_.cuda() for _ in inputs['es']]
+                G1_gt, G2_gt = [_.cuda() for _ in inputs['Gs']]
+                H1_gt, H2_gt = [_.cuda() for _ in inputs['Hs']]
+                KG, KH = [_.cuda() for _ in inputs['Ks']]
+                perm_mat = inputs['gt_perm_mat'].cuda()
+                
+                iter_num = iter_num + 1
+
+                # zero the parameter gradients
+                optimizer.zero_grad()
+
+                with torch.set_grad_enabled(True):
+                    # forward
+                    s_pred, d_pred = \
+                        model(data1, data2, P1_gt, P2_gt, G1_gt, G2_gt, H1_gt, H2_gt, n1_gt, n2_gt, KG, KH, inp_type)
+
+                    multi_loss = []
+                    if cfg.TRAIN.LOSS_FUNC == 'offset':
+                        d_gt, grad_mask = displacement(perm_mat, P1_gt, P2_gt, n1_gt)
+                        loss = criterion(d_pred.double(), d_gt.double(), grad_mask.double())
+                    elif cfg.TRAIN.LOSS_FUNC == 'perm':
+                        loss = criterion(s_pred.float(), perm_mat.float(), n1_gt, n2_gt)
+                    else:
+                        raise ValueError('Unknown loss function {}'.format(cfg.TRAIN.LOSS_FUNC))
+
+                    # backward + optimize
+                    loss.backward()
+                    optimizer.step()
+
+                    #if cfg.MODULE == 'NGM.hypermodel':
+                    #    tfboard_writer.add_scalars(
+                    #        'weight',
+                    #        {'w2': model.module.weight2, 'w3': model.module.weight3},
+                    #        epoch * cfg.TRAIN.EPOCH_ITERS + iter_num
+                    #    )
+
+                    # training accuracy statistic
+                    acc, _, __ = matching_accuracy(lap_solver(s_pred.double(), n1_gt, n2_gt), perm_mat, n1_gt)
+
+
+        if acc > 0.35 and flag_30 == False : 
+            #save_model(model, str(checkpoint_path / 'params_{:04}.pt'.format(epoch + 1)))
+            #torch.save(optimizer.state_dict(), str(checkpoint_path / 'optim_{:04}.pt'.format(epoch + 1)))
+            flag_30 = True
+            print(f"35 on epoch {epoch} with acc {acc}")
+        if acc > 0.5 and flag_50 == False  : 
+            #save_model(model, str(checkpoint_path / 'params_{:04}.pt'.format(epoch + 1)))
+            #torch.save(optimizer.state_dict(), str(checkpoint_path / 'optim_{:04}.pt'.format(epoch + 1)))
+            flag_50 = True
+            print(f"50 on epoch {epoch} with acc {acc}")
+        if acc > 0.75 and flag_70 == False :
+            #save_model(model, str(checkpoint_path / 'params_{:04}.pt'.format(epoch + 1)))
+            #torch.save(optimizer.state_dict(), str(checkpoint_path / 'optim_{:04}.pt'.format(epoch + 1)))
+            flag_70 = True
+            print(f"75 on epoch {epoch} with acc {acc}")
+        if acc > 0.9 :
+            #save_model(model, str(checkpoint_path / 'params_{:04}.pt'.format(epoch + 1)))
+            #torch.save(optimizer.state_dict(), str(checkpoint_path / 'optim_{:04}.pt'.format(epoch + 1)))
+            print(f"90 on epoch {epoch} with acc {acc}")
+
         scheduler.step()
 
-    time_elapsed = time.time() - since
-    print('Training complete in {:.0f}h {:.0f}m {:.0f}s'
-          .format(time_elapsed // 3600, (time_elapsed // 60) % 60, time_elapsed % 60))
+        if epoch % 1 == 0:
+            print('Learning_rate = ' + ', '.join(['{:.2e}'.format(x['lr']) for x in optimizer.param_groups]), end=' ')
+            print('Epoch: {:d} Loss: {:.4f} Acc: {:.4f}'.format(epoch, epoch_loss, acc), end=' ')
+            time_elapsed = time.time() - since
+            print('Time_passed {:.0f}h {:.0f}m {:.0f}s'.format(time_elapsed // 3600, (time_elapsed // 60) % 60, time_elapsed % 60))
 
     return model
 
@@ -178,7 +254,7 @@ if __name__ == '__main__':
 
     torch.manual_seed(cfg.RANDOM_SEED)
 
-    dataset = SGDataset('../scene-graph-proposal/data/vg/')
+    dataset = SGDataset('../scene-graph-IMP/data/vg/')
     dataloader = get_dataloader(dataset)
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -201,11 +277,9 @@ if __name__ == '__main__':
         Path(cfg.OUTPUT_PATH).mkdir(parents=True)
 
     now_time = datetime.now().strftime('%Y-%m-%d-%H-%M-%S')
-    tfboardwriter = SummaryWriter(logdir=str(Path(cfg.OUTPUT_PATH) / 'tensorboard' / 'training_{}'.format(now_time)))
-
-    with DupStdoutFileManager(str(Path(cfg.OUTPUT_PATH) / ('train_log_' + now_time + '.log'))) as _:
-        print_easydict(cfg)
-        model = train_eval_model(model, criterion, optimizer, dataloader, tfboardwriter,
-                                 num_epochs=cfg.TRAIN.NUM_EPOCHS,
-                                 resume=cfg.TRAIN.START_EPOCH != 0,
-                                 start_epoch=cfg.TRAIN.START_EPOCH)
+    
+    print_easydict(cfg)
+    model = train_model(model, criterion, optimizer, dataloader,
+                        num_epochs=cfg.TRAIN.NUM_EPOCHS,
+                        resume=cfg.TRAIN.START_EPOCH != 0,
+                        start_epoch=cfg.TRAIN.START_EPOCH)
