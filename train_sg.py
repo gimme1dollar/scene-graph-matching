@@ -179,32 +179,10 @@ def train_model(model,
                 iter_num = iter_num + 1
 
                 # zero the parameter gradients
-                optimizer.zero_grad()
-
                 with torch.set_grad_enabled(True):
                     # forward
                     s_pred, d_pred = \
                         model(data1, data2, P1_gt, P2_gt, G1_gt, G2_gt, H1_gt, H2_gt, n1_gt, n2_gt, KG, KH, inp_type)
-
-                    multi_loss = []
-                    if cfg.TRAIN.LOSS_FUNC == 'offset':
-                        d_gt, grad_mask = displacement(perm_mat, P1_gt, P2_gt, n1_gt)
-                        loss = criterion(d_pred.double(), d_gt.double(), grad_mask.double())
-                    elif cfg.TRAIN.LOSS_FUNC == 'perm':
-                        loss = criterion(s_pred.float(), perm_mat.float(), n1_gt, n2_gt)
-                    else:
-                        raise ValueError('Unknown loss function {}'.format(cfg.TRAIN.LOSS_FUNC))
-
-                    # backward + optimize
-                    loss.backward()
-                    optimizer.step()
-
-                    #if cfg.MODULE == 'NGM.hypermodel':
-                    #    tfboard_writer.add_scalars(
-                    #        'weight',
-                    #        {'w2': model.module.weight2, 'w3': model.module.weight3},
-                    #        epoch * cfg.TRAIN.EPOCH_ITERS + iter_num
-                    #    )
 
                     # training accuracy statistic
                     acc, _, __ = matching_accuracy(lap_solver(s_pred.double(), n1_gt, n2_gt), perm_mat, n1_gt)
