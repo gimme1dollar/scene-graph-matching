@@ -23,7 +23,6 @@ if __name__ == "__main__":
     add_path(lib_path)
 
 
-max_num = 300
 
 import json
 import os
@@ -127,10 +126,10 @@ class SGDataset(Dataset):
         self.num_data = 0
 
         print("building images...")
-        self.image_list = self.build_image(data_root=data_root+"imdb_1024.h5")
+        self.image_list = self.build_image(data_root=data_root+"imdb_256.h5")
         
         print("building bboxes...")
-        self.boxes_list = self.build_boxes(data_root=data_root+"VG-SGG.h5")
+        self.boxes_list = self.build_bboxes(data_root=data_root+"VG-SGG.h5")
         
         print("building adjencency matrix...")
         self.admat_list = self.build_admat(data_root=data_root+"VG-SGG.h5")
@@ -139,13 +138,15 @@ class SGDataset(Dataset):
         imdb_h5 = h5py.File(data_root, 'r')
         image_list = imdb_h5['images']
 
-        image_list = image_list[:max_num]
+        start = 0*8
+        max_num = 100
+        #image_list = image_list[start:start+max_num]
 
         self.num_data = len(image_list)
         print(f"\ttotal {self.num_data} images")
         return image_list
 
-    def build_boxes(self, data_root):
+    def build_bboxes(self, data_root):
         label_h5 = h5py.File(data_root, 'r')
         boxes_list = []
         for i in range(self.num_data):
@@ -155,12 +156,15 @@ class SGDataset(Dataset):
             boxes_tmp = []
             first_box_idx = label_h5['img_to_first_box'][i]
             last_box_idx = label_h5['img_to_last_box'][i]
-            for b in range(first_box_idx, last_box_idx+1):
-                bbox = label_h5['boxes_1024'][b]
-                node_roi = (bbox[0] + bbox[2] / 2,
-                            bbox[1] + bbox[3] / 2)
+            num_boxes = last_box_idx+1 - first_box_idx
+
+            for b in range(num_boxes):
+                bbox = label_h5['boxes_256'][first_box_idx+b]
+                node_roi = (bbox[0], bbox[1]) # center aligned
                 boxes_tmp.append(node_roi)
             boxes_list.append(boxes_tmp)
+
+        assert len(boxes_list) == self.num_data
         return boxes_list
 
     def build_admat(self, data_root):
@@ -172,28 +176,51 @@ class SGDataset(Dataset):
 
             first_box_idx = label_h5['img_to_first_box'][i]
             last_box_idx = label_h5['img_to_last_box'][i]
-            num_box = last_box_idx + 1 - first_box_idx
+            num_box = last_box_idx+1 - first_box_idx
+            
+            #print(f"num_box : {num_box}")
+            for j in range(num_box):
+                idx = label_h5['labels'][first_box_idx+j][0]
+                idx_str = f"{idx}"
+                #print(f"{j} box : {dict_data['idx_to_label'][idx_str]}")
 
             admat = np.zeros((num_box, num_box))
 
             first_rel_idx = label_h5['img_to_first_rel'][i]
             last_rel_idx = label_h5['img_to_last_rel'][i]
+            
             if first_rel_idx == -1 or last_rel_idx == -1:
-                admat_list.append(admat)
-                continue
+                num_rel = 0
+            else:
+                num_rel = last_rel_idx+1 - first_rel_idx
 
-            for j in range(first_rel_idx, last_rel_idx + 1):
-                src = label_h5['relationships'][j][0] - first_box_idx
-                dst = label_h5['relationships'][j][1] - first_box_idx
+            #print(f"num_rel : {num_rel}")
+            for j in range(num_rel):
+                src = label_h5['relationships'][first_rel_idx+j][0]
+                dst = label_h5['relationships'][first_rel_idx+j][1]
+                
+                sbj_idx = label_h5['labels'][src][0]
+                #sbj = dict_data['idx_to_label'][f"{sbj_idx}"]
+                obj_idx = label_h5['labels'][dst][0]
+                #obj = dict_data['idx_to_label'][f"{obj_idx}"]
 
+                pred_idx = label_h5['predicates'][first_rel_idx+j][0]
+                #predicate = dict_data['idx_to_predicate'][f"{pred_idx}"]
+                #print(f"{j} rel : {label_h5['relationships'][first_rel_idx+j] - first_box_idx} {sbj} {predicate} {obj}")
+
+                src -= first_box_idx
+                dst -= first_box_idx
+                #print(f"img {i} with num_rel {num_rel} (first_rel_idx {first_rel_idx} last_rel_idx {last_rel_idx}) has {src} to {dst}")
                 admat[src][dst] = 1
                 admat[dst][src] = 1
             admat_list.append(admat)
+
+        assert len(admat_list) == self.num_data
         return admat_list
 
     def build_graphs(self, A: np.ndarray, n: int):
         e = int(np.sum(A, axis=(0, 1))) # edge num
-        assert n > 0 and e > 0, 'Error in n = {} and edge_num = {}'.format(n, e)
+        #assert n > 0 and e > 0, 'Error in n = {} and edge_num = {}'.format(n, e)
 
         G = np.zeros((n, e), dtype=np.float32)
         H = np.zeros((n, e), dtype=np.float32)
@@ -218,15 +245,30 @@ class SGDataset(Dataset):
         P1_gt = self.boxes_list[idx]
         n1_gt = len(P1_gt)
         A1_gt = self.admat_list[idx]
-        if n1_gt <= 2 or int(np.sum(A1_gt, axis=(0, 1))) == 0: 
-            return None
         G1_gt, H1_gt, e1_gt = self.build_graphs(A1_gt, n1_gt)
 
+        if n1_gt <= 2 or e1_gt == 0: 
+            #print(f"{idx} : n {n1_gt} and e {e1_gt}")
+
+            ret_dict = {'Ps': [torch.Tensor(x) for x in [P1_gt, P1_gt]],
+                    'ns': [torch.tensor(x) for x in [n1_gt, n1_gt]],
+                    'es': [torch.tensor(x) for x in [e1_gt, e1_gt]],
+                    'gt_perm_mat': torch.tensor(np.eye(n1_gt)),
+                    'Gs': [torch.Tensor(x) for x in [G1_gt, G1_gt]],
+                    'Hs': [torch.Tensor(x) for x in [H1_gt, H1_gt]]}
+
+            imgs = [self.image_list[idx].transpose(1,2,0) for _ in range(2)]
+            trans = transforms.Compose([
+                transforms.ToTensor(),
+                transforms.Normalize(cfg.NORM_MEANS, cfg.NORM_STD)
+            ])
+            imgs = [trans(img) for img in imgs]
+            ret_dict['images'] = imgs
+            return ret_dict
 
         # P2, A2
-        flag = 1
-        while(flag):
-            # mask P1 & A1 to build P2 & A2
+        while(True):
+            # drop node from P1 & A1 to build P2 & A2
             num_box = len(P1_gt)
             num_mask = np.random.randint(1, num_box)
             mask = np.random.choice(num_box, num_mask, replace=False)
@@ -254,10 +296,9 @@ class SGDataset(Dataset):
                 perm_A2[i] = A2_gt[p]
                 perm_mat[i] = match[p]
 
-            if int(np.sum(perm_A2, axis=(0, 1))) != 0:
-                break
+            G2_gt, H2_gt, e2_gt = self.build_graphs(perm_A2, n2_gt)
+            if e2_gt != 0: break
         perm_mat = np.transpose(perm_mat)
-        G2_gt, H2_gt, e2_gt = self.build_graphs(perm_A2, n2_gt)
 
         ret_dict = {'Ps': [torch.Tensor(x) for x in [P1_gt, P2_gt]],
                     'ns': [torch.tensor(x) for x in [n1_gt, n2_gt]],
@@ -300,7 +341,11 @@ def collate_fn(data: list):
             pad_pattern = np.zeros(2 * len(max_shape), dtype=np.int64)
             pad_pattern[::-2] = max_shape - np.array(t.shape)
             pad_pattern = tuple(pad_pattern.tolist())
-            padded_ts.append(F.pad(t, pad_pattern, 'constant', 0))
+            #if 0 in t.shape :
+            #    pass
+            #else:
+            padded = F.pad(t, pad_pattern, 'constant', 0)
+            padded_ts.append(padded)
 
         return padded_ts
 
@@ -325,7 +370,7 @@ def collate_fn(data: list):
         elif type(inp[0]) == str:
             ret = inp
         else:
-            ret = []
+            return []
             #raise ValueError('Cannot handle type {}'.format(type(inp[0])))
         return ret
 
@@ -372,7 +417,7 @@ def get_dataloader(dataset, fix_seed=True, shuffle=False):
     )
 
 if __name__ == "__main__":
-    dataset = SGDataset("../scene-graph-proposal/data/vg/")
+    dataset = SGDataset("../scene-graph-IMP/data/vg/")
     for idx, inputs in enumerate(dataset):
         if inputs != None:
             print(f"{idx} : size of {inputs['Ps'][0].size()}")

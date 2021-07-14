@@ -35,7 +35,7 @@ WILLOW:
 # Training settings
 TRAIN:
   # start, end epochs
-  START_EPOCH: 15
+  START_EPOCH: 0
   NUM_EPOCHS: 30
 
   LOSS_FUNC: offset

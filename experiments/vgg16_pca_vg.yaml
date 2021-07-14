@@ -9,7 +9,7 @@ MODULE: PCA.model
 
 BACKBONE: VGG16_bn
 
-BATCH_SIZE: 1
+BATCH_SIZE: 8
 DATALOADER_NUM: 0
 
 RANDOM_SEED: 123
@@ -36,9 +36,9 @@ TRAIN:
   LOSS_FUNC: perm
 
   # learning rate
-  LR: 1.0e-3
+  LR: 1.0e-5
   MOMENTUM: 0.9
-  LR_DECAY: 0.1
+  LR_DECAY: 0.2
   LR_STEP:  # (in epochs)
     - 100
     - 200

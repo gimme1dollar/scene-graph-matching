@@ -5,7 +5,7 @@ import time
 from tqdm import tqdm
 from datetime import datetime
 from pathlib import Path
-from tensorboardX import SummaryWriter
+import wandb
 
 #from data.data_loader import GMDataset, get_dataloader
 from data.sg_dataset import SGDataset, get_dataloader
@@ -27,16 +27,20 @@ def train_model(model,
                      num_epochs=1200,
                      resume=False,
                      start_epoch=0):
-    print('Start training...')
 
     flag_30 = False
     flag_50 = False
     flag_70 = False
+    flag_90 = False
 
     since = time.time()
     dataset_size = len(dataloader)
+    step_size = dataset_size // 10
     displacement = Displacement()
     lap_solver = hungarian
+
+    print(f'Start training... {dataset_size}')
+
 
     device = next(model.parameters()).device
     print('model on device: {}'.format(device))
@@ -60,37 +64,46 @@ def train_model(model,
                                                gamma=cfg.TRAIN.LR_DECAY,
                                                last_epoch=cfg.TRAIN.START_EPOCH - 1)
 
+    max_acc = 0
+    #prev_permat = None
     for epoch in tqdm(range(start_epoch, num_epochs)):
-
+        evaluation_flag, training_flag = True, True
         epoch_loss = 0.0
         running_loss = 0.0
         running_since = time.time()
-        iter_num = 0
+
+        accs = []
+        data_iterator = iter(dataloader)
+        for idx in tqdm(range(dataset_size)):
+            wandb.log({"idx" : idx})
+
+            try:
+                inputs = next(data_iterator)
+            except:
+                print(f"{idx} continue")
+                continue
 
 
-        # Training
-        model.train()  # Set model to training mode
-        acc = 0
-        np.random.seed(None)
-        for idx, inputs in enumerate(dataloader):
-            if idx > 10000:
-                #print(idx, inputs)
-                if inputs == []:
-                    continue
-                #if idx % 100 == 0:
-                #    print(f"\ton image {idx}")
-                
-                inp_type = 'img'
-                data1, data2 = [_.cuda() for _ in inputs['images']]
-                P1_gt, P2_gt = [_.cuda() for _ in inputs['Ps']]
-                n1_gt, n2_gt = [_.cuda() for _ in inputs['ns']]
-                e1_gt, e2_gt = [_.cuda() for _ in inputs['es']]
-                G1_gt, G2_gt = [_.cuda() for _ in inputs['Gs']]
-                H1_gt, H2_gt = [_.cuda() for _ in inputs['Hs']]
-                KG, KH = [_.cuda() for _ in inputs['Ks']]
-                perm_mat = inputs['gt_perm_mat'].cuda()
-                
-                iter_num = iter_num + 1
+            inp_type = 'img'
+            data1, data2 = [_.cuda() for _ in inputs['images']]
+            P1_gt, P2_gt = [_.cuda() for _ in inputs['Ps']]
+            n1_gt, n2_gt = [_.cuda() for _ in inputs['ns']]
+            e1_gt, e2_gt = [_.cuda() for _ in inputs['es']]
+            G1_gt, G2_gt = [_.cuda() for _ in inputs['Gs']]
+            H1_gt, H2_gt = [_.cuda() for _ in inputs['Hs']]
+            KG, KH = [_.cuda() for _ in inputs['Ks']]
+            perm_mat = inputs['gt_perm_mat'].cuda()
+            
+            # Training
+            if training_flag :
+                print(f"training @ {epoch}")
+                training_flag = False
+
+            if idx in range(step_size*3 + 1) or idx in range(step_size*3, step_size*6 + 1) or idx in range(step_size*6, step_size*9 + 1):
+                #print(f"training {idx}", end=" ")
+                model.train()  # Set model to training mode
+                acc = 0
+                np.random.seed(None)
 
                 # zero the parameter gradients
                 optimizer.zero_grad()
@@ -113,108 +126,86 @@ def train_model(model,
                     loss.backward()
                     optimizer.step()
 
-                    #if cfg.MODULE == 'NGM.hypermodel':
-                    #    tfboard_writer.add_scalars(
-                    #        'weight',
-                    #        {'w2': model.module.weight2, 'w3': model.module.weight3},
-                    #        epoch * cfg.TRAIN.EPOCH_ITERS + iter_num
-                    #    )
-
                     # training accuracy statistic
                     acc, _, __ = matching_accuracy(lap_solver(s_pred.double(), n1_gt, n2_gt), perm_mat, n1_gt)
 
                     # tfboard writer
                     loss_dict = {'loss_{}'.format(i): l.item() for i, l in enumerate(multi_loss)}
                     loss_dict['loss'] = loss.item()
-                    #tfboard_writer.add_scalars('loss', loss_dict, epoch * cfg.TRAIN.EPOCH_ITERS + iter_num)
-                    #accdict = dict()
-                    #accdict['matching accuracy'] = acc
-                    #tfboard_writer.add_scalars(
-                    #    'training accuracy',
-                    #    accdict,
-                    #    epoch * cfg.TRAIN.EPOCH_ITERS + iter_num
-                    #)
 
                     # statistics
                     running_loss += loss.item() * perm_mat.size(0)
                     epoch_loss += loss.item() * perm_mat.size(0)
-
-                    #if iter_num % cfg.STATISTIC_STEP == 0:
-                    #    running_speed = cfg.STATISTIC_STEP * perm_mat.size(0) / (time.time() - running_since)
-                    #    print('Epoch {:<4} Iteration {:<4} {:>4.2f}sample/s Loss={:<8.4f}'
-                    #          .format(epoch, iter_num, running_speed, running_loss / cfg.STATISTIC_STEP / perm_mat.size(0)))
-                    #    tfboard_writer.add_scalars(
-                    #        'speed',
-                    #        {'speed': running_speed},
-                    #        epoch * cfg.TRAIN.EPOCH_ITERS + iter_num
-                    #    )
-                    #    running_loss = 0.0
-                    #    running_since = time.time()
-
-        epoch_loss = epoch_loss / dataset_size
-
-
-        # evaluation
-        model.eval()  
-        acc = 0
-        np.random.seed(123)
-        for idx, inputs in enumerate(dataloader):
-            if idx < 10000:
-                #print(idx, inputs)
-                if inputs == []:
-                    continue
-                #if idx % 100 == 0:
-                #    print(f"\ton image {idx}")
+            
+            # evaluation
+            if idx == step_size * 3 or idx == step_size * 6 or idx == step_size * 9: 
                 
-                inp_type = 'img'
-                data1, data2 = [_.cuda() for _ in inputs['images']]
-                P1_gt, P2_gt = [_.cuda() for _ in inputs['Ps']]
-                n1_gt, n2_gt = [_.cuda() for _ in inputs['ns']]
-                e1_gt, e2_gt = [_.cuda() for _ in inputs['es']]
-                G1_gt, G2_gt = [_.cuda() for _ in inputs['Gs']]
-                H1_gt, H2_gt = [_.cuda() for _ in inputs['Hs']]
-                KG, KH = [_.cuda() for _ in inputs['Ks']]
-                perm_mat = inputs['gt_perm_mat'].cuda()
-                
-                iter_num = iter_num + 1
+                # Evaluation
+                if evaluation_flag :
+                    print(f"evaluation @ {epoch}")
+                    evaluation_flag = False
+                    
+                for i in tqdm(range(step_size*9, dataset_size)):
+                    #print(f"evaluation {idx}", end=" ")
+                    model.eval()  
+                    acc = 0
+                    np.random.seed(123)
 
-                # zero the parameter gradients
-                with torch.set_grad_enabled(True):
-                    # forward
-                    s_pred, d_pred = \
-                        model(data1, data2, P1_gt, P2_gt, G1_gt, G2_gt, H1_gt, H2_gt, n1_gt, n2_gt, KG, KH, inp_type)
+                    #if idx == 24 and epoch == 0 :
+                    #    print(perm_mat)
+                    #    prev_permat = perm_mat
+                    #elif idx == 24:
+                    #    assert torch.all(prev_permat.eq(perm_mat))
 
-                    # training accuracy statistic
-                    acc, _, __ = matching_accuracy(lap_solver(s_pred.double(), n1_gt, n2_gt), perm_mat, n1_gt)
+                    # zero the parameter gradients
+                    with torch.set_grad_enabled(True):
+                        # forward
+                        s_pred, d_pred = \
+                            model(data1, data2, P1_gt, P2_gt, G1_gt, G2_gt, H1_gt, H2_gt, n1_gt, n2_gt, KG, KH, inp_type)
 
+                        # training accuracy statistic
+                        acc, _, __ = matching_accuracy(lap_solver(s_pred.double(), n1_gt, n2_gt), perm_mat, n1_gt)
+                        #print(acc)
+                    accs.append(acc)
 
-        if acc > 0.35 and flag_30 == False : 
-            #save_model(model, str(checkpoint_path / 'params_{:04}.pt'.format(epoch + 1)))
-            #torch.save(optimizer.state_dict(), str(checkpoint_path / 'optim_{:04}.pt'.format(epoch + 1)))
-            flag_30 = True
-            print(f"35 on epoch {epoch} with acc {acc}")
-        if acc > 0.5 and flag_50 == False  : 
-            #save_model(model, str(checkpoint_path / 'params_{:04}.pt'.format(epoch + 1)))
-            #torch.save(optimizer.state_dict(), str(checkpoint_path / 'optim_{:04}.pt'.format(epoch + 1)))
-            flag_50 = True
-            print(f"50 on epoch {epoch} with acc {acc}")
-        if acc > 0.75 and flag_70 == False :
-            #save_model(model, str(checkpoint_path / 'params_{:04}.pt'.format(epoch + 1)))
-            #torch.save(optimizer.state_dict(), str(checkpoint_path / 'optim_{:04}.pt'.format(epoch + 1)))
-            flag_70 = True
-            print(f"75 on epoch {epoch} with acc {acc}")
-        if acc > 0.9 :
-            #save_model(model, str(checkpoint_path / 'params_{:04}.pt'.format(epoch + 1)))
-            #torch.save(optimizer.state_dict(), str(checkpoint_path / 'optim_{:04}.pt'.format(epoch + 1)))
-            print(f"90 on epoch {epoch} with acc {acc}")
+                    epoch_loss = epoch_loss / dataset_size
 
-        scheduler.step()
+                    acc = torch.mean(torch.FloatTensor(accs))
+                    if acc > 0.35 and flag_30 == False : 
+                        #save_model(model, str(checkpoint_path / 'params_{:04}.pt'.format(epoch + 1)))
+                        #torch.save(optimizer.state_dict(), str(checkpoint_path / 'optim_{:04}.pt'.format(epoch + 1)))
+                        flag_30 = True
+                        print(f"35 on epoch {epoch} with acc {acc}")
+                    if acc > 0.5 and flag_50 == False  : 
+                        #save_model(model, str(checkpoint_path / 'params_{:04}.pt'.format(epoch + 1)))
+                        #torch.save(optimizer.state_dict(), str(checkpoint_path / 'optim_{:04}.pt'.format(epoch + 1)))
+                        flag_50 = True
+                        print(f"50 on epoch {epoch} with acc {acc}")
+                    if acc > 0.75 and flag_70 == False :
+                        #save_model(model, str(checkpoint_path / 'params_{:04}.pt'.format(epoch + 1)))
+                        #torch.save(optimizer.state_dict(), str(checkpoint_path / 'optim_{:04}.pt'.format(epoch + 1)))
+                        flag_70 = True
+                        print(f"75 on epoch {epoch} with acc {acc}")
+                    if acc > 0.9 :
+                        #save_model(model, str(checkpoint_path / 'params_{:04}.pt'.format(epoch + 1)))
+                        #torch.save(optimizer.state_dict(), str(checkpoint_path / 'optim_{:04}.pt'.format(epoch + 1)))
+                        print(f"90 on epoch {epoch} with acc {acc}")
 
-        if epoch % 1 == 0:
-            print('Learning_rate = ' + ', '.join(['{:.2e}'.format(x['lr']) for x in optimizer.param_groups]), end=' ')
-            print('Epoch: {:d} Loss: {:.4f} Acc: {:.4f}'.format(epoch, epoch_loss, acc), end=' ')
-            time_elapsed = time.time() - since
-            print('Time_passed {:.0f}h {:.0f}m {:.0f}s'.format(time_elapsed // 3600, (time_elapsed // 60) % 60, time_elapsed % 60))
+                    scheduler.step()
+                    if max_acc < acc: max_acc = acc
+
+                    time_elapsed = time.time() - since
+                    wandb.log({
+                        "Epoch" : epoch,
+                        "Epoch Loss": epoch_loss,
+                        "Valid Accuracy": acc,
+                        "Max Accuracy": max_acc,
+                        "Time": '{:.0f}h {:.0f}m {:.0f}s'.format(time_elapsed // 3600, (time_elapsed // 60) % 60, time_elapsed % 60),
+                        "flag_30" : flag_30,
+                        "flag_50":flag_50,
+                        "flag_75":flag_70,
+                        "flag_90":flag_90
+                        })
 
     return model
 
@@ -223,8 +214,10 @@ if __name__ == '__main__':
     from utils.dup_stdout_manager import DupStdoutFileManager
     from utils.parse_args import parse_args
     from utils.print_easydict import print_easydict
+    wandb.init()
 
     args = parse_args('Deep learning of graph matching training & evaluation code.')
+    wandb.config.update(args)
 
     import importlib
     mod = importlib.import_module(cfg.MODULE)
@@ -239,6 +232,7 @@ if __name__ == '__main__':
 
     model = Net()
     model = model.cuda()
+    wandb.watch(model)
 
     if cfg.TRAIN.LOSS_FUNC == 'offset':
         criterion = RobustLoss(norm=cfg.TRAIN.RLOSS_NORM)

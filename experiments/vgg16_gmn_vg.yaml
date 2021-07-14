@@ -9,8 +9,8 @@ MODULE: GMN.model
 
 BACKBONE: VGG16_bn
 
-BATCH_SIZE: 1
-DATALOADER_NUM: 1
+BATCH_SIZE: 16
+DATALOADER_NUM: 0
 
 RANDOM_SEED: 123
 
@@ -31,18 +31,18 @@ PAIR:
 TRAIN:
   # start, end epochs
   START_EPOCH: 0
-  NUM_EPOCHS: 200
+  NUM_EPOCHS: 100000
 
   LOSS_FUNC: offset
 
   # learning rate
-  LR: 5.0e+2
-  MOMENTUM: 0.9
-  LR_DECAY: 0.1
+  LR: 1.0e-4
+  MOMENTUM: 0.99
+  LR_DECAY: 0.5
   LR_STEP:  # (in epochs)
-    - 10
+    - 5000
 
-  EPOCH_ITERS: 2000  # iterations per epoch
+  EPOCH_ITERS: 20  # iterations per epoch
 
   CLASS: none
 
@@ -55,7 +55,7 @@ EVAL:
 GMN:
   FEATURE_CHANNEL: 512
   PI_ITER_NUM: 25
-  PI_STOP_THRESH: 0. #2.0e-7
+  PI_STOP_THRESH: 2.0e-7
   BS_ITER_NUM: 20
   BS_EPSILON: 1.0e-10
   VOTING_ALPHA: 200.
