@@ -72,7 +72,8 @@ def train_model(model,
         running_loss = 0.0
         running_since = time.time()
 
-        accs = []
+        train_accs = []
+        valid_accs = []
         data_iterator = iter(dataloader)
         for idx in tqdm(range(dataset_size)):
             wandb.log({"idx" : idx})
@@ -136,9 +137,16 @@ def train_model(model,
                     # statistics
                     running_loss += loss.item() * perm_mat.size(0)
                     epoch_loss += loss.item() * perm_mat.size(0)
+                    
+                    train_accs.append(acc)
             
             # evaluation
             if idx == step_size * 3 or idx == step_size * 6 or idx == step_size * 9: 
+
+                training_acc = torch.mean(torch.FloatTensor(valid_accs))
+                wandb.log({"Trainign Accuracy" : training_acc})
+                train_accs = []
+
                 
                 # Evaluation
                 if evaluation_flag :
@@ -166,39 +174,39 @@ def train_model(model,
                         # training accuracy statistic
                         acc, _, __ = matching_accuracy(lap_solver(s_pred.double(), n1_gt, n2_gt), perm_mat, n1_gt)
                         #print(acc)
-                    accs.append(acc)
+                    valid_accs.append(acc)
 
                     epoch_loss = epoch_loss / dataset_size
 
-                    acc = torch.mean(torch.FloatTensor(accs))
-                    if acc > 0.35 and flag_30 == False : 
-                        #save_model(model, str(checkpoint_path / 'params_{:04}.pt'.format(epoch + 1)))
-                        #torch.save(optimizer.state_dict(), str(checkpoint_path / 'optim_{:04}.pt'.format(epoch + 1)))
+                    valid_acc = torch.mean(torch.FloatTensor(valid_accs))
+                    if acc > 0.30 and flag_30 == False : 
+                        save_model(model, str(checkpoint_path / 'params_{:04}.pt'.format(epoch + 1)))
+                        torch.save(optimizer.state_dict(), str(checkpoint_path / 'optim_{:04}.pt'.format(epoch + 1)))
                         flag_30 = True
-                        print(f"35 on epoch {epoch} with acc {acc}")
+                        print(f"35 on epoch {epoch} with acc {valid_acc}")
                     if acc > 0.5 and flag_50 == False  : 
-                        #save_model(model, str(checkpoint_path / 'params_{:04}.pt'.format(epoch + 1)))
-                        #torch.save(optimizer.state_dict(), str(checkpoint_path / 'optim_{:04}.pt'.format(epoch + 1)))
+                        save_model(model, str(checkpoint_path / 'params_{:04}.pt'.format(epoch + 1)))
+                        torch.save(optimizer.state_dict(), str(checkpoint_path / 'optim_{:04}.pt'.format(epoch + 1)))
                         flag_50 = True
-                        print(f"50 on epoch {epoch} with acc {acc}")
-                    if acc > 0.75 and flag_70 == False :
-                        #save_model(model, str(checkpoint_path / 'params_{:04}.pt'.format(epoch + 1)))
-                        #torch.save(optimizer.state_dict(), str(checkpoint_path / 'optim_{:04}.pt'.format(epoch + 1)))
+                        print(f"50 on epoch {epoch} with acc {valid_acc}")
+                    if acc > 0.70 and flag_70 == False :
+                        save_model(model, str(checkpoint_path / 'params_{:04}.pt'.format(epoch + 1)))
+                        torch.save(optimizer.state_dict(), str(checkpoint_path / 'optim_{:04}.pt'.format(epoch + 1)))
                         flag_70 = True
-                        print(f"75 on epoch {epoch} with acc {acc}")
+                        print(f"70 on epoch {epoch} with acc {valid_acc}")
                     if acc > 0.9 :
-                        #save_model(model, str(checkpoint_path / 'params_{:04}.pt'.format(epoch + 1)))
-                        #torch.save(optimizer.state_dict(), str(checkpoint_path / 'optim_{:04}.pt'.format(epoch + 1)))
-                        print(f"90 on epoch {epoch} with acc {acc}")
+                        save_model(model, str(checkpoint_path / 'params_{:04}.pt'.format(epoch + 1)))
+                        torch.save(optimizer.state_dict(), str(checkpoint_path / 'optim_{:04}.pt'.format(epoch + 1)))
+                        print(f"90 on epoch {epoch} with acc {valid_acc}")
 
                     scheduler.step()
-                    if max_acc < acc: max_acc = acc
+                    if max_acc < valid_acc: max_acc = valid_acc
 
                     time_elapsed = time.time() - since
                     wandb.log({
                         "Epoch" : epoch,
                         "Epoch Loss": epoch_loss,
-                        "Valid Accuracy": acc,
+                        "Valid Accuracy": valid_acc,
                         "Max Accuracy": max_acc,
                         "Time": '{:.0f}h {:.0f}m {:.0f}s'.format(time_elapsed // 3600, (time_elapsed // 60) % 60, time_elapsed % 60),
                         "flag_30" : flag_30,
@@ -223,16 +231,21 @@ if __name__ == '__main__':
     mod = importlib.import_module(cfg.MODULE)
     Net = mod.Net
 
-    torch.manual_seed(cfg.RANDOM_SEED)
-
-    dataset = SGDataset('../scene-graph-IMP/data/vg/')
-    dataloader = get_dataloader(dataset)
+    #torch.manual_seed(cfg.RANDOM_SEED)
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
     model = Net()
+    if (device.type == 'cuda') and (torch.cuda.device_count() > 1):
+        model = torch.nn.DataParallel(model)
+        print('*** multi-gpu ***')
     model = model.cuda()
     wandb.watch(model)
+
+
+    dataset = SGDataset('../scene-graph-TF-release/data_tools/')
+    dataloader = get_dataloader(dataset)
+
 
     if cfg.TRAIN.LOSS_FUNC == 'offset':
         criterion = RobustLoss(norm=cfg.TRAIN.RLOSS_NORM)
